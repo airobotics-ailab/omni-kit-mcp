@@ -159,10 +159,22 @@ def load_tool_modules(bridge, modules: Optional[List[str]] = None,
     return results
 
 
+def purge_pycache(directory: str) -> None:
+    """Delete one directory's __pycache__ so the next import recompiles.
+
+    The reasoning, once: .pyc validation is (mtime, size), so an edit within
+    the same second that keeps the size constant — routine in an agent's
+    edit->reload/push cycle — would otherwise serve stale bytecode. Every
+    stale-bytecode guard (module reload here, file push in builtins.put_file)
+    goes through this.
+    """
+    import shutil
+    shutil.rmtree(os.path.join(directory, "__pycache__"), ignore_errors=True)
+
+
 def _purge_bytecode(module: str) -> None:
     """Delete __pycache__ trees under a tool package so re-import recompiles."""
     import importlib.util
-    import shutil
     try:
         spec = importlib.util.find_spec(module)
     except Exception:
@@ -171,13 +183,10 @@ def _purge_bytecode(module: str) -> None:
         return
     if spec.submodule_search_locations:  # package: purge caches in its tree
         for root in spec.submodule_search_locations:
-            for dirpath, dirnames, _ in os.walk(root):
-                if "__pycache__" in dirnames:
-                    shutil.rmtree(os.path.join(dirpath, "__pycache__"),
-                                  ignore_errors=True)
+            for dirpath, _dirnames, _ in os.walk(root):
+                purge_pycache(dirpath)
     else:  # single-file module
-        shutil.rmtree(os.path.join(os.path.dirname(spec.origin), "__pycache__"),
-                      ignore_errors=True)
+        purge_pycache(os.path.dirname(spec.origin))
 
 
 def reload_tool_module(bridge, module: str) -> Dict[str, Any]:
@@ -199,9 +208,13 @@ def reload_tool_module(bridge, module: str) -> Dict[str, Any]:
         bridge.unregister_owner(owner_id)
 
     prefix = module + "."
+    # Exact-segment match, not endswith: a tool module legitimately named e.g.
+    # ``read_state`` must NOT be exempted from the purge, or it survives reload
+    # bound to its OLD sibling imports (2026-07-15: a stale read_state kept a
+    # split-mode _common alive across an articulation-mode flip).
     purged = [name for name in list(sys.modules)
               if (name == module or name.startswith(prefix))
-              and not name.rsplit(".", 1)[-1].endswith(_STATE_SUFFIX)]
+              and name.rsplit(".", 1)[-1] != _STATE_SUFFIX]
     for name in purged:
         del sys.modules[name]
 
