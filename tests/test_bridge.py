@@ -47,8 +47,13 @@ def test_builtins_present_and_bare_named():
 def test_register_owner_canonical_names():
     bridge = make_bridge()
     reg = bridge.register_owner("projA", "pa")
-    assert reg.add(td("hello", lambda: {"hi": 1})) == "pa.hello"
-    assert "pa.hello" in bridge.get_registered_tools()
+    assert reg.add(td("hello", lambda: {"hi": 1},
+                      params={"who": {"type": "string", "required": True}})) == "pa.hello"
+    meta = bridge.get_registered_tools()["pa.hello"]
+    # the registry serves parameters pre-interpreted as field specs (schema.py)
+    assert meta["fields"] == [{"name": "who", "kind": "string", "enum": None,
+                               "required": True, "default": None,
+                               "has_default": False, "description": ""}]
 
 
 def test_registrar_decorator():
@@ -269,3 +274,144 @@ def test_socket_pipelined_frames_in_one_packet():
                 buf += c.recv(65536)
             replies = [json.loads(x) for x in buf.strip().split(b"\n")]
             assert sorted(r["result"]["n"] for r in replies) == [1, 2]
+
+
+# ==================== owner windows (reload-safe UI) ====================
+
+class _FakeUiWindow:
+    def __init__(self, title):
+        self.title = title
+        self.visible = True
+        self.destroyed = False
+
+    def destroy(self):
+        self.destroyed = True
+
+
+def _install_fake_omni_ui(monkeypatch, windows):
+    """Inject a minimal omni.ui with a Workspace serving `windows` by title."""
+    import sys as _sys
+    import types
+
+    ui = types.ModuleType("omni.ui")
+
+    class Workspace:
+        @staticmethod
+        def get_window(title):
+            w = windows.get(title)
+            return None if (w is None or w.destroyed) else w
+
+    ui.Workspace = Workspace
+    omni_pkg = types.ModuleType("omni")
+    omni_pkg.ui = ui
+    monkeypatch.setitem(_sys.modules, "omni", omni_pkg)
+    monkeypatch.setitem(_sys.modules, "omni.ui", ui)
+
+
+def test_registrar_window_offkit_is_noop():
+    """No omni.ui (plain test env) -> declaring windows records + no-ops."""
+    bridge = make_bridge()
+    reg = bridge.register_owner("A", "a")
+    assert reg.window("Panel A") == "Panel A"
+    assert bridge.get_owners()["A"]["windows"] == ["Panel A"]
+    bridge.unregister_owner("A")   # must not raise without a UI runtime
+
+
+def test_unregister_destroys_declared_windows(monkeypatch):
+    """Reload self-healing: the owner's windows die with the owner, so the
+    on-screen UI can't keep driving a retired module instance's closures."""
+    windows = {}
+    _install_fake_omni_ui(monkeypatch, windows)
+    bridge = make_bridge()
+    bridge.register_owner("A", "a").window("Panel A")   # declared at register time
+    windows["Panel A"] = _FakeUiWindow("Panel A")       # tool builds it later
+    bridge.unregister_owner("A")
+    assert windows["Panel A"].destroyed
+
+
+def test_window_declaration_destroys_stale_same_title(monkeypatch):
+    """A window left by a previous module instance dies at declaration time."""
+    stale = _FakeUiWindow("Panel A")
+    _install_fake_omni_ui(monkeypatch, {"Panel A": stale})
+    bridge = make_bridge()
+    bridge.register_owner("A2", "a").window("Panel A")
+    assert stale.destroyed and stale.visible is False
+
+
+# ==================== file transfer builtins ====================
+
+def test_put_get_file_roundtrip(tmp_path):
+    import base64
+    bridge = make_bridge()
+    payload = b"\x00binary\xff and text"
+    dest = str(tmp_path / "nested" / "asset.bin")   # parent doesn't exist yet
+    r = dispatch(bridge, "put_file",
+                 {"path": dest, "content_b64": base64.b64encode(payload).decode()})
+    assert r["status"] == "success" and r["result"]["bytes"] == len(payload)
+    with open(dest, "rb") as f:
+        assert f.read() == payload
+    r = dispatch(bridge, "get_file", {"path": dest})
+    assert base64.b64decode(r["result"]["content_b64"]) == payload
+
+
+def test_put_file_py_purges_pycache(tmp_path):
+    """Pushing a .py drops the sibling __pycache__ — the stale-bytecode guard
+    (same-second same-size edits pass .pyc's (mtime,size) validation)."""
+    import base64
+    bridge = make_bridge()
+    pkg = tmp_path / "toolpkg"
+    cache = pkg / "__pycache__"
+    cache.mkdir(parents=True)
+    (cache / "mod.cpython-310.pyc").write_bytes(b"stale")
+    dispatch(bridge, "put_file",
+             {"path": str(pkg / "mod.py"),
+              "content_b64": base64.b64encode(b"x = 2\n").decode()})
+    assert not cache.exists()
+
+
+def test_file_builtin_errors_are_envelopes(tmp_path):
+    bridge = make_bridge()
+    r = dispatch(bridge, "get_file", {"path": str(tmp_path / "absent")})
+    assert r["status"] == "error" and "cannot read" in r["message"]
+    r = dispatch(bridge, "put_file",
+                 {"path": str(tmp_path / "f"), "content_b64": "!!not-base64!!"})
+    assert r["status"] == "error" and "base64" in r["message"]
+
+
+def test_status_reports_instance_identity():
+    """The multi-instance verification surface: a client that dialed a port
+    can confirm WHO answered — pid/port match this process and this LIVE
+    socket, and off-Kit the app fields degrade to honest unknowns, never
+    guesses."""
+    import os
+    bridge = make_bridge()
+    bridge.start(0, host="127.0.0.1")   # identity is only real once bound
+    try:
+        r = dispatch(bridge, "status", {})
+        assert r["status"] == "success"
+        ident = r["result"]
+        assert ident["pid"] == os.getpid()
+        assert ident["port"] == bridge._port and ident["port"] > 0
+        assert ident["bind_host"] == "127.0.0.1"
+        assert ident["headless"] in (None, True, False)  # off-Kit: no signals
+        assert ident["app"]                              # falls back to argv[0]
+        assert ident["app_version"] is None              # no carb off-Kit
+        assert isinstance(ident["namespaces"], list)
+        assert ident["tools"] >= 1 and ident["uptime_s"] >= 0
+    finally:
+        bridge.stop()
+
+
+def test_stat_file_verifies_content(tmp_path):
+    """The ensure loop's primitive: absent -> exists False; present -> the
+    exact size + sha256 a driver compares against its local file."""
+    import hashlib
+    bridge = make_bridge()
+    p = tmp_path / "asset.usd"
+    r = dispatch(bridge, "stat_file", {"path": str(p)})
+    assert r["status"] == "success" and r["result"] == {"path": str(p), "exists": False}
+    payload = b"usd bytes \x00\xff" * 100
+    p.write_bytes(payload)
+    r = dispatch(bridge, "stat_file", {"path": str(p)})["result"]
+    assert r["exists"] and r["bytes"] == len(payload)
+    assert r["sha256"] == hashlib.sha256(payload).hexdigest()

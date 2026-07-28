@@ -18,8 +18,9 @@ stays importable off-Kit for tests.
 
 Hot reload: ``reload_tools {"module": "demo_tools"}`` re-imports this package
 in place. Live handles that must survive a reload (articulation views, physics
-handles) belong in a submodule named ``*_state`` (see ``demo_tools_state`` in
-the docs) — state modules are preserved across reloads by convention.
+handles) belong in a submodule named exactly ``_state`` — that one module is
+preserved across reloads. The name is exact, not a suffix: a tool module that
+merely ends in ``_state`` (e.g. ``read_state``) reloads normally.
 """
 
 MCP_NAMESPACE = "demo"

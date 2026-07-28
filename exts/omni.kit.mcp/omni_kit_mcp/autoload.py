@@ -28,7 +28,7 @@ bad project can't block the others or wedge bridge startup.
 
 Hot reload: ``reload_tool_module`` (backing the ``reload_tools`` builtin)
 unregisters the module's owner (draining in-flight work), purges the module
-tree from sys.modules — EXCEPT submodules named ``*_state``, the documented
+tree from sys.modules — EXCEPT the submodule named ``_state``, the documented
 home for live handles that must survive a reload — re-imports, re-registers.
 """
 
@@ -59,7 +59,7 @@ from . import knobs
 _ENTRYPOINTS = ("register", "register_tools")
 
 # Submodule basenames preserved across reload_tool_module — live-state homes.
-_STATE_SUFFIX = "_state"
+_STATE_MODULE = "_state"   # exact leaf name, not a suffix (34c6830)
 
 
 def _split_list(raw) -> List[str]:
@@ -193,7 +193,7 @@ def reload_tool_module(bridge, module: str) -> Dict[str, Any]:
     """Hot-reload one autoloaded tool package (backs the reload_tools builtin).
 
     Unregister (draining), purge the module tree from sys.modules except
-    ``*_state`` submodules, re-import, re-register. Live handles parked in a
+    the ``_state`` submodule, re-import, re-register. Live handles parked in a
     state module survive; everything else picks up fresh code.
     """
     # Reload doubles as FIRST load (a project added after Kit launch comes up
@@ -214,7 +214,7 @@ def reload_tool_module(bridge, module: str) -> Dict[str, Any]:
     # split-mode _common alive across an articulation-mode flip).
     purged = [name for name in list(sys.modules)
               if (name == module or name.startswith(prefix))
-              and name.rsplit(".", 1)[-1] != _STATE_SUFFIX]
+              and name.rsplit(".", 1)[-1] != _STATE_MODULE]
     for name in purged:
         del sys.modules[name]
 

@@ -98,32 +98,39 @@ def test_bad_module_is_isolated_and_rolled_back(bridge, tool_dir):
 def test_reload_picks_up_new_code_and_preserves_state(bridge, tool_dir):
     pkg = tool_dir("re_pkg", """
         MCP_NAMESPACE = "re"
-        from . import live_state
+        from . import _state, read_state
         def register(registrar):
             @registrar.tool("version", {})
             def version():
-                return {"v": 1, "counter": live_state.COUNTER}
-    """, submodules={"live_state": "COUNTER = 0\n"})
+                return {"v": 1, "counter": _state.COUNTER, "mode": read_state.MODE}
+    """, submodules={"_state": "COUNTER = 0\n", "read_state": "MODE = 'v1'\n"})
 
     load_tool_modules(bridge, modules=["re_pkg"], paths=[])
-    assert dispatch(bridge, "re.version")["result"] == {"v": 1, "counter": 0}
+    assert dispatch(bridge, "re.version")["result"] == {
+        "v": 1, "counter": 0, "mode": "v1"}
 
-    # Simulate live state accumulating, then edit the tool code.
-    sys.modules["re_pkg.live_state"].COUNTER = 99
+    # Live state accumulates; then edit the entrypoint AND the read_state sibling.
+    sys.modules["re_pkg._state"].COUNTER = 99
     (pkg / "__init__.py").write_text(textwrap.dedent("""
         MCP_NAMESPACE = "re"
-        from . import live_state
+        from . import _state, read_state
         def register(registrar):
             @registrar.tool("version", {})
             def version():
-                return {"v": 2, "counter": live_state.COUNTER}
+                return {"v": 2, "counter": _state.COUNTER, "mode": read_state.MODE}
     """))
+    (pkg / "read_state.py").write_text("MODE = 'v2'\n")
 
     info = reload_tool_module(bridge, "re_pkg")
     assert "re_pkg" in info["reloaded"]
-    assert "re_pkg.live_state" not in info["reloaded"]  # *_state preserved
-    # New code is live; the state module (and its live value) survived.
-    assert dispatch(bridge, "re.version")["result"] == {"v": 2, "counter": 99}
+    # Ratified contract (34c6830): ONLY the module named exactly ``_state`` is
+    # preserved. A tool module that merely ENDS in _state must reload — the
+    # incident was a stale read_state surviving bound to its old siblings.
+    assert "re_pkg._state" not in info["reloaded"]
+    assert "re_pkg.read_state" in info["reloaded"]
+    # New code live in both entrypoint and read_state; live value survived.
+    assert dispatch(bridge, "re.version")["result"] == {
+        "v": 2, "counter": 99, "mode": "v2"}
 
 
 def test_reload_of_never_loaded_module_loads_fresh(bridge, tool_dir):

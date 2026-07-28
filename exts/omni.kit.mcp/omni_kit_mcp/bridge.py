@@ -32,8 +32,9 @@ import uuid
 from dataclasses import dataclass, field
 from typing import Any, Callable, Dict, List, Optional, Set
 
-from . import protocol
+from . import protocol, schema
 from .protocol import ToolError
+from .sessions import SessionStore
 
 try:
     import carb
@@ -123,6 +124,21 @@ class OwnerRegistrar:
             return fn
         return decorate
 
+    def window(self, title: str) -> str:
+        """Declare an ``omni.ui.Window`` title this owner builds.
+
+        A window built by one module instance survives ``reload_tools`` with
+        closures over the dead module's state — the dispatch layer hot-swaps
+        but the on-screen UI keeps driving old code. Declaring the title here
+        makes reloads self-healing: the bridge destroys the owner's declared
+        windows when the owner is unregistered (reload/teardown), and any
+        stale same-titled window is destroyed at declaration time too. The
+        window-spawning tool just rebuilds fresh on its next invocation.
+
+        Off-Kit (no ``omni.ui``) this records the title and otherwise no-ops.
+        """
+        return self._bridge._register_window(self.owner_id, title)
+
 
 @dataclass
 class _ClientConnection:
@@ -154,11 +170,13 @@ class McpBridge:
         self._namespaces: Dict[str, str] = {}          # namespace -> owner_id
         self._tools: Dict[str, RegisteredTool] = {}    # canonical name -> tool
         self._owner_tools: Dict[str, Set[str]] = {}    # owner_id -> canonical names
+        self._owner_windows: Dict[str, Set[str]] = {}  # owner_id -> omni.ui window titles
         self._in_flight: Dict[str, int] = {}           # owner_id -> live dispatch count
         self._draining: Set[str] = set()               # owners awaiting final cleanup
 
-        # Persistent run_python sessions (in-memory, keyed by session_id).
-        self._python_sessions: Dict[str, Dict[str, Any]] = {}
+        # Persistent run_python sessions — the store owns the persist policy
+        # and the staleness contract (see sessions.py).
+        self.sessions = SessionStore()
 
         # Socket server state.
         self._socket: Optional[socket.socket] = None
@@ -166,6 +184,8 @@ class McpBridge:
         self._running = False
         self._connections: Dict[str, _ClientConnection] = {}
         self._port: Optional[int] = None
+        self._bind_host: Optional[str] = None
+        self._started_at: Optional[float] = None
 
         self._register_builtins()
 
@@ -213,17 +233,35 @@ class McpBridge:
             self._owner_tools[owner_id].add(canonical)
             return canonical
 
+    def _register_window(self, owner_id: str, title: str) -> str:
+        """Record an owner's omni.ui window title (via OwnerRegistrar.window)
+        and destroy any stale same-titled window left by a previous module
+        instance. Destroyed again on unregister so reloads are self-healing."""
+        with self._lock:
+            owner = self._owners.get(owner_id)
+            if owner is None or owner_id in self._draining:
+                raise ValueError(f"owner {owner_id!r} is not registered")
+            self._owner_windows.setdefault(owner_id, set()).add(title)
+        _destroy_ui_window(title)
+        return title
+
     def unregister_owner(self, owner_id: str) -> None:
         """Remove an owner. Tools leave resolution immediately; final cleanup
-        defers until the owner's in-flight dispatches drain (see _dispatch)."""
+        defers until the owner's in-flight dispatches drain (see _dispatch).
+        Declared windows are destroyed now — they belong to the module
+        instance being retired, and letting them live would leave on-screen UI
+        driving dead closures after a reload."""
         with self._lock:
             if owner_id not in self._owners:
                 return
             for canonical in self._owner_tools.get(owner_id, set()):
                 self._tools.pop(canonical, None)
+            windows = self._owner_windows.pop(owner_id, set())
             self._draining.add(owner_id)
             if self._in_flight.get(owner_id, 0) == 0:
                 self._finalize_owner_locked(owner_id)
+        for title in windows:   # UI teardown outside the registry lock
+            _destroy_ui_window(title)
 
     def _finalize_owner_locked(self, owner_id: str) -> None:
         """Complete a drained owner's removal. Caller holds the lock."""
@@ -231,17 +269,21 @@ class McpBridge:
         if owner and owner.namespace is not None:
             self._namespaces.pop(owner.namespace, None)
         self._owner_tools.pop(owner_id, None)
+        self._owner_windows.pop(owner_id, None)
         self._in_flight.pop(owner_id, None)
         self._draining.discard(owner_id)
 
     def get_registered_tools(self, include_internal: bool = False) -> Dict[str, Dict[str, Any]]:
         """Discovery view: canonical name -> metadata. Canonical names only —
-        the advertised surface never changes with co-load state."""
+        the advertised surface never changes with co-load state. ``fields``
+        carries the parameters pre-interpreted as field specs (schema.py) so
+        renderers never read raw parameter schemas."""
         with self._lock:
             return {
                 t.canonical_name: {
                     "description": t.definition.description,
                     "parameters": t.definition.parameters,
+                    "fields": schema.field_specs(t.definition.parameters),
                     "namespace": t.namespace,
                     "owner_id": t.owner_id,
                 }
@@ -258,6 +300,7 @@ class McpBridge:
                     "display_name": o.display_name,
                     "metadata": dict(o.metadata),
                     "tools": sorted(self._owner_tools.get(o.owner_id, set())),
+                    "windows": sorted(self._owner_windows.get(o.owner_id, set())),
                     "draining": o.owner_id in self._draining,
                 }
                 for o in self._owners.values()
@@ -272,10 +315,10 @@ class McpBridge:
         return None
 
     def clear_sessions(self) -> None:
-        """Drop all persistent run_python sessions (e.g. on a new stage, when
-        saved vars may hold now-dead prim/handle references)."""
-        with self._lock:
-            self._python_sessions.clear()
+        """Drop all persistent run_python sessions. The bridge extension calls
+        this on every stage-open event — a new stage kills the prims/handles
+        saved session vars point at (see sessions.py)."""
+        self.sessions.clear()
 
     def _register_builtins(self) -> None:
         """The verbs the transport itself owns, bare-named (no namespace)."""
@@ -366,6 +409,8 @@ class McpBridge:
             port = self._socket.getsockname()[1]   # learn the real port (0 -> ephemeral)
             with self._lock:
                 self._port = port
+                self._bind_host = host
+                self._started_at = time.time()
             self._socket.listen(socket.SOMAXCONN)
             self._server_thread = threading.Thread(
                 target=self._accept_loop, name="omni.kit.mcp-accept", daemon=True)
@@ -479,6 +524,31 @@ class McpBridge:
             _log_warn(f"[omni.kit.mcp] client {conn.connection_id} went away mid-reply")
 
 
+# ==================== Owner UI teardown ====================
+
+def _destroy_ui_window(title: str) -> bool:
+    """Best-effort destroy of an omni.ui window by workspace title.
+
+    Called on Kit's main thread (registration and unregistration both happen
+    inside dispatched tool handlers or extension lifecycle). Off-Kit there is
+    no omni.ui and no windows — a clean no-op keeps the bridge testable.
+    """
+    try:
+        import omni.ui as ui
+    except ImportError:
+        return False
+    try:
+        window = ui.Workspace.get_window(title)
+        if window is None:
+            return False
+        window.visible = False
+        window.destroy()
+        return True
+    except Exception as e:
+        _log_warn(f"[omni.kit.mcp] could not destroy window {title!r}: {e}")
+        return False
+
+
 # ==================== Port discovery (runtime portfiles) ====================
 # The bridge advertises itself in a per-user runtime dir so clients that were
 # given no port can DISCOVER a running bridge (kit_mcp.client mirrors this
@@ -496,20 +566,44 @@ def _portfile_path(port: int) -> str:
     return os.path.join(_runtime_dir(), f"{os.getpid()}-{port}.json")
 
 
+def _app_identity() -> Dict[str, Any]:
+    """Best-effort Kit app identity — the WHO of this instance.
+
+    One source of truth for both identity surfaces: the runtime portfile
+    (filesystem discovery, same-box) and the ``status`` builtin (wire-level,
+    what a remote client verifies against). Degrades to Nones off-Kit so the
+    same surface serves tests and real instances.
+
+    ``headless`` is inferred from signals, not one API: the
+    ``/app/window/enabled`` carb setting (set false by ``--no-window``) and
+    the launch argv. Neither present -> None (unknown), never a guess.
+    """
+    app = version = None
+    headless = None
+    try:
+        import carb
+        s = carb.settings.get_settings()
+        app = s.get("/app/name")
+        version = s.get("/app/version")
+        window_enabled = s.get("/app/window/enabled")
+        if window_enabled is not None:
+            headless = not bool(window_enabled)
+    except Exception:
+        pass
+    if headless is None and any(
+            a in ("--no-window", "--headless") for a in (sys.argv or [])):
+        headless = True
+    return {"app": app or os.path.basename(sys.argv[0] or "python"),
+            "app_version": version, "headless": headless}
+
+
 def _write_portfile(host: str, port: int) -> None:
     """Best-effort advertisement; never fatal."""
     try:
         os.makedirs(_runtime_dir(), exist_ok=True)
-        app = None
-        try:
-            import carb
-            app = carb.settings.get_settings().get("/app/name")
-        except Exception:
-            pass
         dial_host = "127.0.0.1" if host in ("0.0.0.0", "::", "") else host
         payload = {"pid": os.getpid(), "port": port, "host": dial_host,
-                   "app": app or os.path.basename(sys.argv[0] or "python"),
-                   "started": time.time()}
+                   "started": time.time(), **_app_identity()}
         with open(_portfile_path(port), "w") as f:
             json.dump(payload, f)
     except Exception as e:

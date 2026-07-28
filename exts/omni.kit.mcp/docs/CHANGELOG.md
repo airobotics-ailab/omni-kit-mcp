@@ -28,7 +28,7 @@ All notable changes to this extension are documented here. Format follows
   overrides. Port from `OMNI_KIT_MCP_PORT` or the `autostartPort` setting.
 - Builtins: `run_python` (persistent in-memory sessions), `list_tools`
   (discovery, internal), `reload_tools` (hot-reload one tool package in place;
-  `*_state` submodules preserved, stale bytecode purged; doubles as first load
+  the `_state` submodule preserved, stale bytecode purged; doubles as first load
   for projects registered after launch), `list_bridges` (this box's advertised
   bridges — how remote callers find ephemeral-port siblings).
 - Config knobs defined once (`knobs.py`): port (`autostartPort` /

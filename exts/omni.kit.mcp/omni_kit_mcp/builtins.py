@@ -4,7 +4,11 @@
 thread, with optional persistent sessions); ``list_tools`` is tool discovery;
 ``reload_tools`` hot-reloads one autoloaded tool package in place;
 ``list_bridges`` reports every bridge advertised on this box (so remote
-callers, who can't read local portfiles, can find ephemeral-port siblings).
+callers, who can't read local portfiles, can find ephemeral-port siblings);
+``put_file``/``get_file``/``stat_file`` are the file data plane: move files
+to/from the bridge's box and verify what's there, so a remote driver can ship
+tool code and assets — and skip unchanged ones — without a side-channel
+rsync/scp.
 
 Handlers here follow the same contract as any tool: return the payload dict,
 or raise (``ToolError`` to attach diagnostics). The bridge owns the envelope.
@@ -39,7 +43,7 @@ _RUN_PYTHON_PARAMETERS = {
 
 _RELOAD_TOOLS_DESCRIPTION = (
     "Hot-reload one autoloaded tool package: unregister its owner, re-import "
-    "the module (submodules named *_state are preserved so live handles "
+    "the module (the submodule named _state is preserved so live handles "
     "survive), and re-register its tools. Follow with the MCP front-end's "
     "refresh so new schemas are rediscovered."
 )
@@ -64,16 +68,16 @@ def cmd_run_python(bridge, code: str, session_id: str = "default",
     import omni
     from pxr import Gf, Sdf, Usd, UsdGeom
 
-    # Preloaded convenience symbols — not user-defined, never saved to sessions.
-    _builtin_keys = {"omni", "carb", "Usd", "UsdGeom", "Sdf", "Gf", "__builtins__"}
+    from .sessions import PRELOADED
 
-    exec_globals = {
-        "omni": omni, "carb": carb,
-        "Usd": Usd, "UsdGeom": UsdGeom, "Sdf": Sdf, "Gf": Gf,
-        "__builtins__": __builtins__,
-    }
-    if persistent and session_id in bridge._python_sessions:
-        exec_globals.update(bridge._python_sessions[session_id])
+    # Preloaded convenience symbols — the names come from sessions.PRELOADED
+    # (the store's never-persist policy), so injection and policy can't drift.
+    preload = {"omni": omni, "carb": carb,
+               "Usd": Usd, "UsdGeom": UsdGeom, "Sdf": Sdf, "Gf": Gf}
+    assert set(preload) == set(PRELOADED)
+    exec_globals = {**preload, "__builtins__": __builtins__}
+    if persistent:
+        exec_globals.update(bridge.sessions.namespace(session_id))
 
     old_stdout = sys.stdout
     sys.stdout = capture = io.StringIO()
@@ -87,20 +91,121 @@ def cmd_run_python(bridge, code: str, session_id: str = "default",
     finally:
         sys.stdout = old_stdout
 
-    if persistent:
-        bridge._python_sessions[session_id] = {
-            k: v for k, v in exec_globals.items()
-            if not k.startswith("_") and k not in _builtin_keys
-        }
-
     payload = {
         "output": capture.getvalue(),
         "result": exec_globals.get("result", None),
     }
     if persistent:
         payload["session_id"] = session_id
-        payload["session_vars"] = list(bridge._python_sessions.get(session_id, {}).keys())
+        payload["session_vars"] = bridge.sessions.persist(session_id, exec_globals)
     return payload
+
+
+_PUT_FILE_DESCRIPTION = (
+    "Write a file on the bridge's box (content base64-encoded). run_python "
+    "executes on the box, so code and assets must exist on ITS disk — this "
+    "verb ships them from a remote driver without a side-channel rsync/scp. "
+    "Writing a .py purges the sibling __pycache__ so the next import can't "
+    "serve stale bytecode. Content rides one NDJSON frame in memory: right "
+    "for code and tool-sized assets, not multi-GB payloads."
+)
+_PUT_FILE_PARAMETERS = {
+    "path": {"type": "string", "required": True,
+             "description": "Destination path on the bridge's box (~ expands)."},
+    "content_b64": {"type": "string", "required": True,
+                    "description": "File content, base64-encoded."},
+    "mkdirs": {"type": "boolean",
+               "description": "Create missing parent directories (default true)."},
+}
+
+
+def cmd_put_file(bridge, path: str, content_b64: str, mkdirs: bool = True) -> Dict[str, Any]:
+    """Write bytes to the box's disk; the box-side half of remote file push."""
+    import base64
+    import binascii
+    import os
+
+    from .autoload import purge_pycache
+
+    try:
+        data = base64.b64decode(content_b64, validate=True)
+    except (binascii.Error, ValueError) as e:
+        raise ToolError(f"content_b64 is not valid base64: {e}")
+    p = os.path.abspath(os.path.expanduser(path))
+    parent = os.path.dirname(p)
+    if mkdirs and parent:
+        os.makedirs(parent, exist_ok=True)
+    with open(p, "wb") as f:
+        f.write(data)
+    if p.endswith(".py"):
+        purge_pycache(parent)   # a pushed edit must never serve stale bytecode
+    return {"path": p, "bytes": len(data)}
+
+
+def cmd_get_file(bridge, path: str) -> Dict[str, Any]:
+    """Read a file from the box's disk, base64-encoded; the pull half."""
+    import base64
+    import os
+
+    p = os.path.abspath(os.path.expanduser(path))
+    try:
+        with open(p, "rb") as f:
+            data = f.read()
+    except OSError as e:
+        raise ToolError(f"cannot read {p}: {e}")
+    return {"path": p, "bytes": len(data),
+            "content_b64": base64.b64encode(data).decode("ascii")}
+
+
+def cmd_stat_file(bridge, path: str) -> Dict[str, Any]:
+    """Existence/size/sha256 of a box-side file — the verify half of the file
+    data plane. A remote driver ensures instead of blindly pushing: stat, skip
+    when the hash matches, push only what changed — and can fail fast naming
+    exactly which asset is stale, whatever bulk channel carried it."""
+    import hashlib
+    import os
+
+    p = os.path.abspath(os.path.expanduser(path))
+    if not os.path.isfile(p):
+        return {"path": p, "exists": False}
+    h = hashlib.sha256()
+    size = 0
+    with open(p, "rb") as f:
+        for chunk in iter(lambda: f.read(1 << 20), b""):
+            h.update(chunk)
+            size += len(chunk)
+    return {"path": p, "exists": True, "bytes": size, "sha256": h.hexdigest()}
+
+
+def cmd_status(bridge) -> Dict[str, Any]:
+    """Instance identity over the wire — WHICH bridge answered this socket.
+
+    On a multi-instance box (several bridged Kit processes on distinct ports)
+    a client verifies it reached the instance it intended: pid + port +
+    headless-vs-headful + app version, plus what's registered. The filesystem
+    portfile advertises the same identity, but only same-box clients can read
+    it — status is the surface a REMOTE client gets."""
+    import os
+    import platform
+    import socket as _socket
+    import time
+
+    from .bridge import _app_identity
+
+    ident = _app_identity()
+    started = bridge._started_at
+    ident.update({
+        "pid": os.getpid(),
+        "port": bridge._port,
+        "bind_host": bridge._bind_host,
+        "hostname": _socket.gethostname(),
+        "python": platform.python_version(),
+        "started": started,
+        "uptime_s": round(time.time() - started, 1) if started else None,
+        "namespaces": sorted(bridge._namespaces),
+        "tools": len(bridge.get_registered_tools(include_internal=True)),
+    })
+    return ident
 
 
 def cmd_list_bridges(bridge) -> Dict[str, Any]:
@@ -164,6 +269,37 @@ def builtin_tools(bridge) -> List:
             description=_RELOAD_TOOLS_DESCRIPTION,
             parameters=_RELOAD_TOOLS_PARAMETERS,
             handler=functools.partial(cmd_reload_tools, bridge),
+        ),
+        ToolDefinition(
+            name="put_file",
+            description=_PUT_FILE_DESCRIPTION,
+            parameters=_PUT_FILE_PARAMETERS,
+            handler=functools.partial(cmd_put_file, bridge),
+        ),
+        ToolDefinition(
+            name="get_file",
+            description="Read a file from the bridge box's disk, returned "
+                        "base64-encoded (content_b64). Pull half of put_file.",
+            parameters={"path": {"type": "string", "required": True,
+                                 "description": "Path on the bridge's box (~ expands)."}},
+            handler=functools.partial(cmd_get_file, bridge),
+        ),
+        ToolDefinition(
+            name="status",
+            description="Instance identity: pid, port, headless-vs-headful, "
+                        "app + version, uptime, registered namespaces — verify "
+                        "you reached the instance you intended.",
+            parameters={},
+            handler=functools.partial(cmd_status, bridge),
+        ),
+        ToolDefinition(
+            name="stat_file",
+            description="Existence, size, and sha256 of a file on the bridge's "
+                        "box — lets a remote driver skip unchanged pushes and "
+                        "verify assets instead of blindly re-syncing.",
+            parameters={"path": {"type": "string", "required": True,
+                                 "description": "Path on the bridge's box (~ expands)."}},
+            handler=functools.partial(cmd_stat_file, bridge),
         ),
         # Served like any tool, hidden from its own listing.
         ToolDefinition(
