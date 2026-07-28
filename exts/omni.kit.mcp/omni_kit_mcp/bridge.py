@@ -601,16 +601,19 @@ def _write_portfile(host: str, port: int) -> None:
     """Best-effort advertisement; never fatal."""
     try:
         os.makedirs(_runtime_dir(), exist_ok=True)
+        _sweep_stale_portfiles()
         dial_host = "127.0.0.1" if host in ("0.0.0.0", "::", "") else host
         payload = {"pid": os.getpid(), "port": port, "host": dial_host,
                    "started": time.time(), **_app_identity()}
         with open(_portfile_path(port), "w") as f:
             json.dump(payload, f)
-        # Backstop for fast shutdowns that skip extension on_shutdown
-        # (observed live: headless SimulationApp close() on Isaac 5.1) — a
-        # normal interpreter exit still runs atexit, so the box stops
-        # advertising a bridge that no longer exists. Idempotent with stop()'s
-        # removal; clients additionally prune dead-pid portfiles on discovery.
+        # Cleanup is layered — no single hook covers every exit path:
+        #   stop()   -> removes on graceful extension shutdown;
+        #   atexit   -> covers plain-interpreter exits (verified live that
+        #               Kit's fast shutdown SKIPS atexit, so it is not enough);
+        #   sweep    -> _sweep_stale_portfiles() above: every bridge start
+        #               garbage-collects dead-pid leftovers on this box;
+        #   clients  -> discovery prunes dead-pid/dead-socket files on read.
         import atexit
         atexit.register(_remove_portfile, port)
     except Exception as e:
@@ -622,6 +625,31 @@ def _remove_portfile(port: int) -> None:
         os.unlink(_portfile_path(port))
     except OSError:
         pass
+
+
+def _sweep_stale_portfiles() -> None:
+    """Unlink advertisements whose process is gone (best-effort).
+
+    Kit's fast shutdown (/app/fastShutdown, the SimulationApp default) skips
+    both extension on_shutdown AND atexit — verified live on Isaac 5.1 — so a
+    headless instance can never guarantee its own cleanup. Each bridge START
+    sweeps the box's runtime dir instead: dead files are safe to unlink from
+    any process, and a box that launches bridges keeps itself clean."""
+    try:
+        names = os.listdir(_runtime_dir())
+    except OSError:
+        return
+    for name in names:
+        path = os.path.join(_runtime_dir(), name)
+        try:
+            with open(path) as f:
+                pid = int(json.load(f)["pid"])
+            os.kill(pid, 0)
+        except (OSError, ValueError, KeyError):
+            try:
+                os.unlink(path)
+            except OSError:
+                pass
 
 
 # ==================== Process-global singleton ====================

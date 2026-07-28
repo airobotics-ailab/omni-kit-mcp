@@ -378,6 +378,38 @@ def test_file_builtin_errors_are_envelopes(tmp_path):
     assert r["status"] == "error" and "base64" in r["message"]
 
 
+def test_start_sweeps_stale_portfiles(tmp_path, monkeypatch):
+    """Kit's fast shutdown skips on_shutdown AND atexit (verified live on
+    Isaac 5.1) — so an instance can't guarantee its own cleanup. The next
+    bridge START on the box garbage-collects the leftovers."""
+    import json
+    import os
+    import subprocess
+    import sys
+
+    monkeypatch.setenv("XDG_RUNTIME_DIR", str(tmp_path))
+    rt = tmp_path / "omni-kit-mcp"
+    rt.mkdir()
+    dead = subprocess.run([sys.executable, "-c", "import os; print(os.getpid())"],
+                          capture_output=True, text=True)
+    dead_pid = int(dead.stdout.strip())          # a pid guaranteed exited
+    stale = rt / f"{dead_pid}-9999.json"
+    stale.write_text(json.dumps({"pid": dead_pid, "port": 9999, "host": "127.0.0.1"}))
+    junk = rt / "not-json.json"
+    junk.write_text("{broken")                   # unparseable -> also swept
+
+    bridge = make_bridge()
+    bridge.start(0, host="127.0.0.1")
+    try:
+        assert not stale.exists()                # dead advertisement swept
+        assert not junk.exists()
+        live = list(rt.glob("*.json"))
+        assert len(live) == 1                    # exactly our own remains
+        assert json.loads(live[0].read_text())["pid"] == os.getpid()
+    finally:
+        bridge.stop()
+
+
 def test_portfile_removed_at_exit_even_without_stop(tmp_path):
     """The observed failure mode (dual-a4500, headless Isaac 5.1): app close()
     skips extension on_shutdown, so stop() never runs — the atexit hook must
