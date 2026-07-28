@@ -88,7 +88,10 @@ def test_bad_module_is_isolated_and_rolled_back(bridge, tool_dir):
     results = load_tool_modules(
         bridge, modules=["bad_pkg", "no_entry", "good_pkg"], paths=[])
     assert str(results["bad_pkg"]).startswith("ERROR")
-    assert "entrypoint" in str(results["no_entry"])
+    # A package without register() is a DECLARED TOOLSET (its public
+    # functions become the tools). One with neither an entrypoint nor public
+    # functions has nothing to serve, and says so.
+    assert "no public functions" in str(results["no_entry"])
     assert results["good_pkg"]["tools"] == ["good.t"]
     # bad_pkg's half-registration was rolled back: namespace + owner freed
     assert "bad.t" not in bridge.get_registered_tools()

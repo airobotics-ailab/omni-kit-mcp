@@ -204,6 +204,12 @@ def cmd_status(bridge) -> Dict[str, Any]:
         "uptime_s": round(time.time() - started, 1) if started else None,
         "namespaces": sorted(bridge._namespaces),
         "tools": len(bridge.get_registered_tools(include_internal=True)),
+        # namespace -> sha256 of the serving module's source tree: a client
+        # compares against its local copy to detect the box serving older
+        # code than it expects (fingerprinted at registration/reload).
+        "toolsets": {o["namespace"]: o["metadata"]["source_hash"]
+                     for o in bridge.get_owners().values()
+                     if o["metadata"].get("source_hash")},
     })
     return ident
 

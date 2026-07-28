@@ -66,7 +66,8 @@ which reaches everything in the sim. Tools discovered from the bridge appear as 
 ## Adding a project (the contract)
 
 A project is a **plain Python package** — not a Kit extension. It declares a
-namespace and exposes one entrypoint (copy `examples/demo_tools/`):
+namespace and either exposes one entrypoint (copy `examples/demo_tools/`) or
+none at all — see the declared-toolset form below:
 
 ```python
 # ~/myproj/isaac/myproj_tools/__init__.py
@@ -95,6 +96,18 @@ persistence: `KIT_MCP_TOOL_PATHS=~/myproj/isaac KIT_MCP_TOOL_MODULES=myproj_tool
 > the reference client/CLI can call it from scripts — all three go through the
 > same dispatch entrance. Write the tool once; button, agent call, and script
 > call come with it.
+
+**Declared toolsets — zero boilerplate.** A package with NO `register()` is
+introspected instead: every public function (or exactly `__all__`) becomes a
+tool. The typed parameter schema derives from the signature — type hints map
+to JSON kinds, a default marks the parameter optional, pydantic-style models
+advertise their `model_json_schema()` — and the description from the
+docstring's first line. Sync and async functions alike (async handlers are
+awaited on Kit's loop). Adding a public function to the library IS publishing
+it. Programmatic form: `register_toolset(bridge, module)` (importable from
+`omni_kit_mcp`). `status` reports a per-namespace `source_hash` of the served
+code so a client can detect staleness; `reload_tools` re-derives the surface
+after an edit.
 
 Handler contract: params arrive as kwargs; return a JSON-serializable payload
 (`None` → `{}`) or raise (`ToolError` attaches diagnostics like captured

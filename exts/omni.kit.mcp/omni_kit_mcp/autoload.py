@@ -1,7 +1,7 @@
 """Consumer-tool auto-loader for the omni.kit.mcp bridge.
 
 The project contract: a tool project is a plain Python package — NOT a Kit
-extension — that declares its identity and exposes one entrypoint:
+extension — that declares its identity and, optionally, an entrypoint:
 
     MCP_NAMESPACE = "arm"                 # public tool prefix (defaults to the
                                           # module name if omitted)
@@ -9,6 +9,9 @@ extension — that declares its identity and exposes one entrypoint:
     def register(registrar):              # or register_tools(registrar)
         registrar.add(ToolDefinition(...))
         # or: @registrar.tool("desc", {...params})
+
+A package with no entrypoint is a DECLARED TOOLSET: its public functions
+register as the tools directly, schemas derived from signatures (toolset.py).
 
 The autoloader owns the owner lifecycle: it calls ``register_owner`` (owner_id
 = module name, the plain-package analogue of ext_id) and hands the entrypoint
@@ -114,21 +117,27 @@ def _namespace_for(mod, mod_name: str) -> str:
 
 
 def _register_one(bridge, mod_name: str) -> Dict[str, Any]:
-    """Import one tool package, register its owner, run its entrypoint.
+    """Import one tool package and register it — via its entrypoint when it
+    has one, else as a DECLARED TOOLSET (its public functions become the
+    tools; see toolset.py).
 
-    Returns {"namespace": ..., "tools": [...]}. On entrypoint failure the
+    Returns {"namespace": ..., "tools": [...]}. On failure the
     half-registered owner is rolled back so a retry/reload starts clean.
     """
+    from .toolset import register_toolset, source_hash
+
     mod = importlib.import_module(mod_name)
     entry = next(
         (getattr(mod, n) for n in _ENTRYPOINTS if callable(getattr(mod, n, None))),
         None)
     if entry is None:
-        raise ValueError(f"no {' or '.join(_ENTRYPOINTS)}(registrar) entrypoint")
+        return register_toolset(bridge, mod, owner_id=mod_name,
+                                namespace=_namespace_for(mod, mod_name))
 
     namespace = _namespace_for(mod, mod_name)
     registrar = bridge.register_owner(
-        owner_id=mod_name, namespace=namespace, metadata={"module": mod_name})
+        owner_id=mod_name, namespace=namespace,
+        metadata={"module": mod_name, "source_hash": source_hash(mod)})
     try:
         entry(registrar)
     except Exception:

@@ -1,8 +1,9 @@
 # omni.kit.mcp
 
 Generic MCP socket bridge for Omniverse Kit. One bridge, one port, per Kit
-process: projects are plain tool packages (`MCP_NAMESPACE` +
-`register(registrar)`) autoloaded by the bridge and advertised canonically as
+process: projects are plain tool packages (`MCP_NAMESPACE` + an optional
+`register(registrar)` — without one, the package's public functions register
+directly as a declared toolset) autoloaded by the bridge and advertised canonically as
 `<namespace>.<tool>` over an NDJSON-over-TCP protocol, with every handler
 dispatched on Kit's main thread. Builtins: `run_python` (the escape hatch),
 `list_tools` (discovery), `reload_tools` (hot reload), `list_bridges`

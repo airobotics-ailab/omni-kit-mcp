@@ -364,17 +364,20 @@ class McpBridge:
                     result = await result
             return protocol.success(result)
         except ToolError as e:
-            return protocol.error(str(e), **e.details)
+            return protocol.error(
+                str(e), **{"error_type": type(e).__name__, **e.details})
         except TypeError as e:
             # Most common authoring/caller mismatch: bad kwargs. Name the tool's
             # declared parameters in the reply so the caller can self-correct.
             return protocol.error(
                 f"{name}: {e}",
+                error_type=type(e).__name__,
                 expected_parameters=list(tool.definition.parameters.keys()),
                 traceback=traceback.format_exc())
         except Exception as e:
             _log_error(f"[omni.kit.mcp] {name} handler failed: {e}")
-            return protocol.error(str(e), traceback=traceback.format_exc())
+            return protocol.error(str(e), error_type=type(e).__name__,
+                                  traceback=traceback.format_exc())
         finally:
             with self._lock:
                 self._in_flight[owner_id] = max(0, self._in_flight.get(owner_id, 1) - 1)

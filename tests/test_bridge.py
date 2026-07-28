@@ -477,3 +477,19 @@ def test_stat_file_verifies_content(tmp_path):
     r = dispatch(bridge, "stat_file", {"path": str(p)})["result"]
     assert r["exists"] and r["bytes"] == len(payload)
     assert r["sha256"] == hashlib.sha256(payload).hexdigest()
+
+def test_error_envelope_names_the_exception_class():
+    """Typed errors: a handler exception surfaces with its class name, so a
+    client can branch on error KIND without parsing the message."""
+    bridge = make_bridge()
+    reg = bridge.register_owner(owner_id="err_owner", namespace="err")
+
+    @reg.tool("always raises", {})
+    def boom():
+        raise ValueError("kaput")
+
+    r = dispatch(bridge, "err.boom")
+    assert r["status"] == "error"
+    assert r["error_type"] == "ValueError"
+    assert r["message"] == "kaput"
+    assert "ValueError: kaput" in r["traceback"]
