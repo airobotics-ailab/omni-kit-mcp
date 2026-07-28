@@ -378,6 +378,36 @@ def test_file_builtin_errors_are_envelopes(tmp_path):
     assert r["status"] == "error" and "base64" in r["message"]
 
 
+def test_portfile_removed_at_exit_even_without_stop(tmp_path):
+    """The observed failure mode (dual-a4500, headless Isaac 5.1): app close()
+    skips extension on_shutdown, so stop() never runs — the atexit hook must
+    still unadvertise on normal interpreter exit."""
+    import glob
+    import os
+    import subprocess
+    import sys
+
+    import omni_kit_mcp
+
+    ext_dir = os.path.dirname(os.path.dirname(omni_kit_mcp.__file__))
+    code = (
+        "import glob, os\n"
+        "from omni_kit_mcp.bridge import McpBridge, _runtime_dir\n"
+        "b = McpBridge(schedule_coroutine=lambda c: None)\n"
+        "b.start(0, host='127.0.0.1')\n"
+        "print(glob.glob(os.path.join(_runtime_dir(), '*.json'))[0])\n"
+        # exits WITHOUT b.stop() — the whole point
+    )
+    env = {**os.environ, "XDG_RUNTIME_DIR": str(tmp_path),
+           "PYTHONPATH": ext_dir}
+    proc = subprocess.run([sys.executable, "-c", code],
+                          capture_output=True, text=True, env=env, timeout=30)
+    assert proc.returncode == 0, proc.stderr
+    portfile = proc.stdout.strip().splitlines()[-1]
+    assert portfile.endswith(".json")        # it WAS advertised while alive
+    assert not os.path.exists(portfile)      # and unadvertised at exit
+
+
 def test_status_reports_instance_identity():
     """The multi-instance verification surface: a client that dialed a port
     can confirm WHO answered — pid/port match this process and this LIVE

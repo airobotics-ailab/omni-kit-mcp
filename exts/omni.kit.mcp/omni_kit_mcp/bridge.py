@@ -606,6 +606,13 @@ def _write_portfile(host: str, port: int) -> None:
                    "started": time.time(), **_app_identity()}
         with open(_portfile_path(port), "w") as f:
             json.dump(payload, f)
+        # Backstop for fast shutdowns that skip extension on_shutdown
+        # (observed live: headless SimulationApp close() on Isaac 5.1) — a
+        # normal interpreter exit still runs atexit, so the box stops
+        # advertising a bridge that no longer exists. Idempotent with stop()'s
+        # removal; clients additionally prune dead-pid portfiles on discovery.
+        import atexit
+        atexit.register(_remove_portfile, port)
     except Exception as e:
         _log_warn(f"[omni.kit.mcp] could not write portfile: {e}")
 
