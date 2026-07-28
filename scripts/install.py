@@ -147,7 +147,9 @@ class Config:
         print("WROTE config. Restart the Kit app — changes apply on next launch.")
         print("NOTE: if the app is RUNNING right now, it will overwrite this file")
         print("with its in-memory settings on exit — restart it promptly, or")
-        print("re-run this command after closing it.")
+        print("re-run this command after closing it. (The overwrite happens in")
+        print("the app's graceful-exit config flush; a hard kill -9 skips the")
+        print("flush and leaves this registration intact.)")
 
 
 # ==================== commands ====================

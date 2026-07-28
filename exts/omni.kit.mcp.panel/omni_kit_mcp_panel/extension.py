@@ -4,9 +4,10 @@ Renders the live bridge registry: one collapsible section per namespace in
 owner-registration order — bridge builtins first (collapsed to one line),
 project namespaces appending below in the order they were registered, so a
 newly loaded project never inserts between existing sections. Each tool is a
-two-column card — label + Run button, then
-one row per parameter, widgets generated from the tool's JSON schema
-(enum -> ComboBox, boolean -> CheckBox, integer/number -> Int/FloatField,
+two-column card — label + Run button, then one row per parameter, widgets
+generated from the registry's bridge-served **field specs** (the schema
+vocabulary is interpreted once, in omni_kit_mcp.schema; the panel only renders
+kinds: enum -> ComboBox, boolean -> CheckBox, integer/number -> Int/FloatField,
 everything else -> StringField; array/object fields accept JSON text).
 
 The iron rule: widgets never call project logic directly. Every Run button
@@ -64,40 +65,42 @@ def _panel_style():
 
 
 class _ParamField:
-    """One schema-driven parameter row + how to read a value out of it."""
+    """One field-spec-driven parameter row + how to read a value out of it.
 
-    def __init__(self, name: str, schema: dict):
-        self.name = name
-        self.schema = schema
-        self.ptype = schema.get("type", "string")
-        self.enum = schema.get("enum")
-        self.required = bool(schema.get("required"))
+    Consumes the registry's bridge-served field spec (omni_kit_mcp.schema) —
+    it never interprets a raw parameter schema; it only renders ``kind``."""
 
-        desc = schema.get("description", "")
-        label = f"{name} *" if self.required else name
+    def __init__(self, spec: dict):
+        self.name = spec["name"]
+        self.kind = spec["kind"]
+        self.enum = spec["enum"]
+        self.required = spec["required"]
+
+        desc = spec["description"]
+        default = spec["default"]          # None when has_default is false
+        label = f"{self.name} *" if self.required else self.name
         with ui.HStack(height=_ROW_HEIGHT, spacing=8):
             ui.Label(label, width=_LABEL_WIDTH, tooltip=desc,
                      alignment=ui.Alignment.LEFT_CENTER,
                      style={"color": _COLOR_MUTED})
-            default = schema.get("default")
-            if self.enum:
+            if self.kind == "enum":
                 start = self.enum.index(default) if default in self.enum else 0
                 self._widget = ui.ComboBox(start, *[str(v) for v in self.enum])
-            elif self.ptype == "boolean":
+            elif self.kind == "boolean":
                 self._widget = ui.CheckBox(width=20)
                 if isinstance(default, bool):
                     self._widget.model.set_value(default)
-            elif self.ptype == "integer":
+            elif self.kind == "integer":
                 self._widget = ui.IntField(height=_ROW_HEIGHT - 4)
                 if isinstance(default, int):
                     self._widget.model.set_value(default)
-            elif self.ptype == "number":
+            elif self.kind == "number":
                 self._widget = ui.FloatField(height=_ROW_HEIGHT - 4)
                 if isinstance(default, (int, float)):
                     self._widget.model.set_value(float(default))
             else:  # string / array / object — text; JSON-parsed for the latter two
                 self._widget = ui.StringField(height=_ROW_HEIGHT - 4)
-                placeholder = desc if self.ptype == "string" else f"JSON {self.ptype}"
+                placeholder = desc if self.kind == "string" else f"JSON {self.kind}"
                 try:
                     self._widget.model.set_value(str(default) if isinstance(default, str) else "")
                     self._widget.tooltip = placeholder
@@ -107,19 +110,19 @@ class _ParamField:
     def value(self):
         """Read the widget; returns (value, include) — empty strings are omitted
         so tool defaults apply instead of forcing ''."""
-        if self.enum:
+        if self.kind == "enum":
             idx = self._widget.model.get_item_value_model().get_value_as_int()
             return self.enum[idx], True
-        if self.ptype == "boolean":
+        if self.kind == "boolean":
             return self._widget.model.get_value_as_bool(), True
-        if self.ptype == "integer":
+        if self.kind == "integer":
             return self._widget.model.get_value_as_int(), True
-        if self.ptype == "number":
+        if self.kind == "number":
             return self._widget.model.get_value_as_float(), True
         text = self._widget.model.get_value_as_string()
         if not text:
             return None, False
-        if self.ptype in ("array", "object"):
+        if self.kind in ("array", "object"):
             return json.loads(text), True  # raises -> surfaced in the status label
         return text, True
 
@@ -218,9 +221,7 @@ class McpPanelExtension(omni.ext.IExt):
                 self._status[name] = ui.Label(
                     "", alignment=ui.Alignment.LEFT_CENTER, word_wrap=True,
                     style={"color": _COLOR_MUTED})
-            params = meta.get("parameters", {})
-            self._fields[name] = (
-                [_ParamField(p, s) for p, s in params.items()] if params else [])
+            self._fields[name] = [_ParamField(s) for s in meta.get("fields", [])]
             ui.Spacer(height=3)
 
     # ==================== dispatch (the iron rule) ====================

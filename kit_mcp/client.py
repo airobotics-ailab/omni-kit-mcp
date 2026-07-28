@@ -22,17 +22,27 @@ Two lifetimes, one roundtrip:
 
 Errors: BridgeError = the bridge answered with an error envelope (its
 diagnostic keys — traceback, output, expected_parameters — ride on .details).
-OSError/TimeoutError = couldn't reach or lost the bridge. RuntimeError = port
-resolution failed (no port given and discovery found zero or several bridges).
+OSError/TimeoutError = couldn't reach or lost the bridge. RuntimeError =
+endpoint resolution failed (no port given and discovery found zero or several
+bridges).
 
 CLI (replaces printf|nc recipes):
 
     python3 -m kit_mcp.client <tool> ['{"json":"params"}'] [--port N] [--host H] [--timeout S]
     python3 -m kit_mcp.client --list-bridges     # bridges advertised on this box
 
-Port resolution: explicit --port/port= > $OMNI_KIT_MCP_PORT > auto-discovery
-via the runtime portfiles when exactly one bridge is running (loud error when
-several are). Exit codes: 0 = success · 1 = bridge answered with an error ·
+Endpoint resolution — host and port resolve together, from the same portfile
+when discovery is the source (a bridge bound to a tailnet IP advertises that
+IP; dialing loopback for its port would be wrong):
+
+    port: explicit --port/port= > $OMNI_KIT_MCP_PORT > auto-discovery via the
+          runtime portfiles when exactly one bridge is running (loud error
+          when several are)
+    host: explicit --host/host= > $OMNI_KIT_MCP_HOST > the discovered
+          portfile's advertised host (only when the port came from discovery)
+          > 127.0.0.1
+
+Exit codes: 0 = success · 1 = bridge answered with an error ·
 2 = bridge unreachable / usage error.
 """
 
@@ -41,10 +51,13 @@ import os
 import socket
 from typing import Any, Dict, Optional
 
-# The cross-process public name for the bridge port. Kept in sync with the
-# bridge-side knob table (omni_kit_mcp.knobs.PORT.env) by test, not by import —
-# this file must stay dependency-free and copyable.
+# The cross-process public names for the bridge endpoint. PORT_ENV is kept in
+# sync with the bridge-side knob table (omni_kit_mcp.knobs.PORT.env) by test,
+# not by import — this file must stay dependency-free and copyable. HOST_ENV
+# is the caller-side dial override (which host to connect to; distinct from
+# the bridge-side bind knob OMNI_KIT_MCP_BIND).
 PORT_ENV = "OMNI_KIT_MCP_PORT"
+HOST_ENV = "OMNI_KIT_MCP_HOST"
 DEFAULT_HOST = "127.0.0.1"
 DEFAULT_TIMEOUT = 300.0
 
@@ -109,16 +122,23 @@ def discover_bridges() -> list:
     return found
 
 
-def _resolve_port(port) -> int:
-    """Explicit > $OMNI_KIT_MCP_PORT > discovery-if-unambiguous > loud error."""
+def _resolve_endpoint(host, port) -> tuple:
+    """(host, port), resolved together so a discovered pair stays a pair.
+
+    port: explicit > $OMNI_KIT_MCP_PORT > discovery-if-unambiguous > loud error.
+    host: explicit > $OMNI_KIT_MCP_HOST > the SAME portfile's advertised host
+    (only when the port itself came from discovery) > 127.0.0.1.
+    """
+    host = host or os.getenv(HOST_ENV)
     if port:
-        return int(port)
+        return (host or DEFAULT_HOST, int(port))
     env = os.getenv(PORT_ENV)
     if env:
-        return int(env)
+        return (host or DEFAULT_HOST, int(env))
     bridges = discover_bridges()
     if len(bridges) == 1:
-        return int(bridges[0]["port"])
+        return (host or bridges[0].get("host") or DEFAULT_HOST,
+                int(bridges[0]["port"]))
     if len(bridges) > 1:
         listing = ", ".join(
             f"{b.get('app', '?')} pid={b['pid']} port={b['port']}" for b in bridges)
@@ -145,24 +165,28 @@ class BridgeClient:
     executed (retrying would re-execute a possibly non-idempotent tool).
     """
 
-    def __init__(self, host: str = DEFAULT_HOST, port: Optional[int] = None,
+    def __init__(self, host: Optional[str] = None, port: Optional[int] = None,
                  timeout: float = DEFAULT_TIMEOUT):
-        self.host = host
-        self._port = port          # resolved lazily so env-less import works
-        self.timeout = timeout
+        self._host = host          # endpoint resolved lazily (per connect) so
+        self._port = port          # env-less import works and a restarted
+        self.timeout = timeout     # bridge can be re-discovered
         self._sock: Optional[socket.socket] = None
         self._buffer = b""
 
     @property
+    def host(self) -> str:
+        return _resolve_endpoint(self._host, self._port)[0]
+
+    @property
     def port(self) -> int:
-        return _resolve_port(self._port)
+        return _resolve_endpoint(self._host, self._port)[1]
 
     # -- lifecycle --
 
     def connect(self) -> None:
         if self._sock is None:
-            self._sock = socket.create_connection((self.host, self.port),
-                                                  timeout=self.timeout)
+            self._sock = socket.create_connection(
+                _resolve_endpoint(self._host, self._port), timeout=self.timeout)
             self._buffer = b""
 
     def close(self) -> None:
@@ -249,7 +273,7 @@ class BridgeClient:
 
 
 def call(tool: str, params: Optional[Dict[str, Any]] = None, *,
-         host: str = DEFAULT_HOST, port: Optional[int] = None,
+         host: Optional[str] = None, port: Optional[int] = None,
          timeout: float = DEFAULT_TIMEOUT) -> Any:
     """One-shot call: fresh socket, fitted timeout, closed afterwards."""
     with BridgeClient(host=host, port=port, timeout=timeout) as client:
@@ -271,7 +295,9 @@ def main(argv=None) -> int:
                         help="list running bridges advertised in the runtime dir")
     parser.add_argument("params", nargs="?", default="{}",
                         help='JSON object of parameters (default: {})')
-    parser.add_argument("--host", default=DEFAULT_HOST)
+    parser.add_argument("--host", default=None,
+                        help=f"bridge host (default: ${HOST_ENV}, else the "
+                             "discovered bridge's advertised host)")
     parser.add_argument("--port", type=int, default=None,
                         help=f"bridge port (default: ${PORT_ENV})")
     parser.add_argument("--timeout", type=float, default=DEFAULT_TIMEOUT)

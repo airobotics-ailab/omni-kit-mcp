@@ -2,7 +2,7 @@
 
 Registry-driven control panel for the `omni.kit.mcp` bridge. One collapsible
 section per namespace, one row per registered tool, parameter widgets generated
-from each tool's schema. Install once; every project's tools appear
+from each tool's bridge-served field specs (`omni_kit_mcp.schema`). Install once; every project's tools appear
 automatically when their packages register — nothing per-project, nothing
 generated on disk.
 

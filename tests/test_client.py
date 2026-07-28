@@ -195,6 +195,48 @@ def test_cli_list_bridges(monkeypatch, tmp_path):
         assert listed and listed[0]["port"] == live.port
 
 
+def test_discovery_uses_advertised_host(monkeypatch, tmp_path):
+    """Host and port resolve from the SAME portfile: a bridge bound to a
+    non-loopback-default address (e.g. a tailnet IP) advertises that host, and
+    a no-arg call() must dial it — not take the port and dial 127.0.0.1."""
+    alias = "127.0.0.2"   # loopback alias: bindable on Linux without setup
+    probe = __import__("socket").socket()
+    try:
+        probe.bind((alias, 0))
+    except OSError:
+        pytest.skip(f"loopback alias {alias} not bindable on this platform")
+    finally:
+        probe.close()
+
+    monkeypatch.setenv("XDG_RUNTIME_DIR", str(tmp_path))
+    monkeypatch.delenv("OMNI_KIT_MCP_PORT", raising=False)
+    monkeypatch.delenv("OMNI_KIT_MCP_HOST", raising=False)
+    import asyncio, threading
+    import test_bridge
+    loop = asyncio.new_event_loop()
+    t = threading.Thread(target=loop.run_forever, daemon=True)
+    t.start()
+    bridge = test_bridge.make_bridge(loop)
+    bridge.register_owner("A", "demo").add(td("ping", lambda: {"ok": 1}))
+    try:
+        bridge.start(0, host=alias)          # NOT reachable on 127.0.0.1
+        from kit_mcp.client import discover_bridges
+        assert discover_bridges()[0]["host"] == alias
+        assert call("demo.ping") == {"ok": 1}   # no host, no port -> discovered pair
+    finally:
+        bridge.stop()
+        loop.call_soon_threadsafe(loop.stop)
+        t.join(timeout=2)
+        loop.close()
+
+
+def test_host_env_is_honored(live, monkeypatch):
+    """$OMNI_KIT_MCP_HOST is the dial override between explicit and discovery."""
+    monkeypatch.setenv("OMNI_KIT_MCP_HOST", "localhost")
+    monkeypatch.setenv("OMNI_KIT_MCP_PORT", str(live.port))
+    assert call("demo.ping", {"message": "env"}) == {"echo": "env"}
+
+
 def test_ephemeral_bind_and_discovery(monkeypatch, tmp_path):
     """port=0 binds an OS-assigned port, learns it, advertises it — the
     same-app-second-instance fallback path."""

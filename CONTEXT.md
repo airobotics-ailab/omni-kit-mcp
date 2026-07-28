@@ -18,9 +18,11 @@ these things and no others.
   consumer imports it or copies it; nobody re-implements it.
 - **Portfile / discovery** — each running bridge advertises `{pid, port, host,
   app}` in `$XDG_RUNTIME_DIR/omni-kit-mcp/<pid>-<port>.json`. Clients given no
-  port discover a lone bridge (and error on ambiguity). Ports are per Kit
-  *process*, so numbers are convention (installer 9009, Lab 9010), never
-  identity — discovery, not a fixed map, is the resolution.
+  endpoint discover a lone bridge (and error on ambiguity); host and port
+  resolve together from the same portfile, so a tailnet-bound bridge is dialed
+  on its advertised host. Ports are per Kit *process*, so numbers are
+  convention (installer 9009, Lab 9010), never identity — discovery, not a
+  fixed map, is the resolution.
 - **Tool package** — a plain Python package with `MCP_NAMESPACE` and
   `register(registrar)`; the consumer contract.
 - **Owner / namespace** — a registered provider and its public tool prefix;
@@ -28,6 +30,17 @@ these things and no others.
 - **Knob** — a configuration value with exactly one identity (env name,
   settings keys, precedence rule), defined once in `omni_kit_mcp/knobs.py`.
   Readers call it; the writer (`scripts/install.py`) imports its names.
+- **Field spec** — a tool parameter pre-interpreted for rendering: `{name,
+  kind, enum, required, default, has_default, description}`. The schema
+  vocabulary is interpreted exactly once, bridge-side (`omni_kit_mcp/
+  schema.py`); the registry serves field specs alongside raw parameters, and
+  renderers (gateway signature builder, panel widgets) only switch on `kind` —
+  they never read a raw parameter schema.
+- **Session store** — the owner of persistent `run_python` namespaces
+  (`omni_kit_mcp/sessions.py`): the persist policy (underscore names and
+  preloaded symbols never survive) and the staleness rule (the extension
+  clears the store on every stage-open — saved vars hold in-process prim/
+  handle references that a new stage kills).
 - **Iron rule** — UI widgets never call tool logic directly; every widget
   dispatches through `bridge.dispatch(...)`, the same entrance a socket
   request takes.

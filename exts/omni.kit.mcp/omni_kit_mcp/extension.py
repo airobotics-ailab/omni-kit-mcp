@@ -1,7 +1,8 @@
 """IExt lifecycle for omni.kit.mcp — the bridge owns the socket, always.
 
-One bridge, one port, per Kit process. on_startup: build the singleton, load
-the configured tool packages (autoload.py), bind the socket. Consumers never
+One bridge, one port, per Kit process. on_startup: build the singleton, arm
+the run_python session staleness guard (stage-open -> clear), load the
+configured tool packages (autoload.py), bind the socket. Consumers never
 call start()/stop() — projects are plain tool packages registered persistently
 via ``scripts/install.py add-project`` (or per-launch via KIT_MCP_TOOL_* env).
 
@@ -46,6 +47,7 @@ class McpBridgeExtension(omni.ext.IExt):
         # generic [py stdout] channel; carb.log_* stays greppable per-channel.
         carb.log_info("[omni.kit.mcp] startup")
         bridge = _create_bridge()
+        self._stage_sub = _guard_sessions_against_stage_open(bridge)
 
         results = load_tool_modules(bridge) if has_autoload_request() else {}
 
@@ -77,4 +79,27 @@ class McpBridgeExtension(omni.ext.IExt):
 
     def on_shutdown(self):
         carb.log_info("[omni.kit.mcp] shutdown")
+        self._stage_sub = None   # release the stage-event subscription
         _destroy_bridge()
+
+
+def _guard_sessions_against_stage_open(bridge):
+    """Subscribe: stage-open -> drop persistent run_python sessions.
+
+    Saved session vars are live in-process objects (prim references, physics
+    handles); a new stage kills what they point at, so serving them after a
+    stage-open would hand out dead handles. Returns the subscription (keep a
+    reference or it unsubscribes), or None in a Kit app without omni.usd —
+    no stages there means nothing to go stale."""
+    try:
+        import omni.usd
+        stream = omni.usd.get_context().get_stage_event_stream()
+        opened = int(omni.usd.StageEventType.OPENED)
+        return stream.create_subscription_to_pop_by_type(
+            opened, lambda _e: bridge.clear_sessions(),
+            name="omni.kit.mcp sessions stage-open guard")
+    except ImportError:
+        carb.log_warn(
+            "[omni.kit.mcp] omni.usd unavailable — persistent run_python "
+            "sessions will NOT auto-clear on stage open")
+        return None

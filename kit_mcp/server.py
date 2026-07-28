@@ -10,7 +10,8 @@ MCP server" is just this binary with a namespace filter, not a separate port:
     OMNI_KIT_MCP_PORT   bridge port. Optional: unset, the client discovers a
                         lone running bridge via its runtime portfile (and
                         errors loudly on ambiguity). Set it to pin a process.
-                        OMNI_KIT_MCP_HOST optional, default localhost.
+                        OMNI_KIT_MCP_HOST optional dial override; unset, the
+                        discovered bridge's advertised host (else loopback).
     KIT_MCP_NAMESPACE   comma-separated namespace allowlist; unset => all.
     KIT_MCP_BUILTINS    "0" hides the bridge's bare builtins (run_python,
                         reload_tools) — the curated-agent view.
@@ -51,10 +52,6 @@ SERVER_INSTRUCTIONS = os.getenv(
 RESPONSE_TIMEOUT_S = 300.0
 
 
-def _resolve_host() -> str:
-    return os.getenv("OMNI_KIT_MCP_HOST", "localhost")
-
-
 def _namespace_filter() -> Optional[set]:
     raw = os.getenv("KIT_MCP_NAMESPACE", "").strip()
     if not raw:
@@ -93,8 +90,9 @@ _client: Optional[BridgeClient] = None
 def get_client() -> BridgeClient:
     global _client
     if _client is None:
-        _client = BridgeClient(host=_resolve_host(), port=None,   # port: $OMNI_KIT_MCP_PORT
-                               timeout=RESPONSE_TIMEOUT_S)
+        # host/port unset -> the client resolves the endpoint ($OMNI_KIT_MCP_HOST /
+        # $OMNI_KIT_MCP_PORT, else portfile discovery) — one resolution path.
+        _client = BridgeClient(timeout=RESPONSE_TIMEOUT_S)
     return _client
 
 
@@ -158,32 +156,37 @@ def discover_and_register_tools(server: FastMCP) -> List[str]:
     return changed
 
 
-def _build_tool_function(name: str, canonical: str, description: str,
-                         tool_params: Dict[str, Any]):
-    """Build a function with a real signature/annotations for FastMCP schemas."""
-    from typing import Literal
+_KIND_ANNOTATIONS = {"boolean": bool, "integer": int, "number": float,
+                     "array": list, "object": dict, "string": str}
 
+
+def _build_tool_function(name: str, canonical: str, description: str,
+                         fields: List[Dict[str, Any]]):
+    """Build a function with a real signature/annotations for FastMCP schemas.
+
+    ``fields`` are the bridge-served field specs (the schema vocabulary is
+    interpreted once, bridge-side — schema.py); this only renders them.
+    Required fields without a declared default become required parameters;
+    optional fields default to their declared default, else None — and None
+    values are dropped before dispatch so bridge-side handler defaults apply.
+    """
+    from typing import Literal, Optional
+
+    # def-order: required-without-default parameters must precede defaulted ones.
+    ordered = sorted(fields, key=lambda f: not (f["required"] and not f["has_default"]))
     param_list = []
     annotations: Dict[str, Any] = {"return": str}
-    for param_name, param_def in tool_params.items():
-        ptype = param_def.get("type", "string")
-        enum_values = param_def.get("enum")
-        if enum_values:
-            annotation, default = Literal[tuple(enum_values)], enum_values[0]
-        elif ptype == "boolean":
-            annotation, default = bool, False
-        elif ptype == "integer":
-            annotation, default = int, 0
-        elif ptype == "number":
-            annotation, default = float, 0.0
-        elif ptype == "array":
-            annotation, default = list, None
-        elif ptype == "object":
-            annotation, default = dict, None
+    for f in ordered:
+        annotation = (Literal[tuple(f["enum"])] if f["kind"] == "enum"
+                      else _KIND_ANNOTATIONS[f["kind"]])
+        if f["required"] and not f["has_default"]:
+            param_list.append(f["name"])
         else:
-            annotation, default = str, ""
-        param_list.append(f"{param_name}={default!r}")
-        annotations[param_name] = annotation
+            default = f["default"] if f["has_default"] else None
+            if default is None:
+                annotation = Optional[annotation]
+            param_list.append(f"{f['name']}={default!r}")
+        annotations[f["name"]] = annotation
 
     params_str = ", ".join(param_list)
     # No docstring in the exec'd source — descriptions are arbitrary text and
@@ -233,8 +236,12 @@ def _tool_implementation(canonical: str, params: Dict[str, Any]) -> str:
 def register_dynamic_tool(server: FastMCP, name: str, canonical: str,
                           meta: Dict[str, Any]) -> None:
     description = meta.get("description", f"Execute {canonical} on the Kit bridge")
-    handler = _build_tool_function(name, canonical, description,
-                                   meta.get("parameters", {}))
+    if "fields" not in meta:
+        raise RuntimeError(
+            f"bridge served no field specs for {canonical!r} — the parameter "
+            "schema is interpreted bridge-side (omni_kit_mcp.schema); update "
+            "the omni.kit.mcp extension to match this gateway.")
+    handler = _build_tool_function(name, canonical, description, meta["fields"])
 
     # Optional _meta category from policy hooks (failures are non-fatal).
     category = None
