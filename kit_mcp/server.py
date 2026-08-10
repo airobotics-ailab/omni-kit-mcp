@@ -81,19 +81,24 @@ def register_meta_category_hook(fn: Callable[[str], Optional[str]]) -> None:
 
 # ==================== Bridge connection ====================
 # The wire protocol lives in kit_mcp.client (the reference client): framing,
-# envelope decoding, health checks, and the reconnect-retry are its job. The
-# gateway holds one persistent BridgeClient.
+# envelope decoding, health checks, and the reconnect-retry are its job.
+#
+# The gateway deliberately does NOT hold a persistent connection. Every bridge
+# exchange dials, calls, and closes. Rationale: an idle-but-established TCP
+# connection is indistinguishable (to host-side capture/lease managers watching
+# the bridge port) from a client that is mid-capture, so a gateway that idles
+# for hours while holding a socket blocks out-of-band capture leases for the
+# whole host. Ephemeral connections restore the invariant "connection visible
+# == call in flight". Loopback dial cost is microseconds against tool runtimes,
+# and bridge-side run_python session state is keyed by session_id in the
+# bridge's own store, so it survives across connections by design.
 
-_client: Optional[BridgeClient] = None
 
-
-def get_client() -> BridgeClient:
-    global _client
-    if _client is None:
-        # host/port unset -> the client resolves the endpoint ($OMNI_KIT_MCP_HOST /
-        # $OMNI_KIT_MCP_PORT, else portfile discovery) — one resolution path.
-        _client = BridgeClient(timeout=RESPONSE_TIMEOUT_S)
-    return _client
+def _bridge_call(tool: str, params: Optional[Dict[str, Any]] = None) -> Any:
+    # host/port unset -> the client resolves the endpoint ($OMNI_KIT_MCP_HOST /
+    # $OMNI_KIT_MCP_PORT, else portfile discovery) — one resolution path.
+    with BridgeClient(timeout=RESPONSE_TIMEOUT_S) as client:
+        return client.call(tool, params)
 
 
 # ==================== Dynamic tool registration ====================
@@ -133,7 +138,7 @@ def discover_and_register_tools(server: FastMCP) -> List[str]:
     changed since their registration — e.g. after a bridge-side reload_tools —
     are RE-registered so the served schema never goes stale. Returns the
     canonical names added or updated."""
-    result = get_client().call("list_tools")
+    result = _bridge_call("list_tools")
     tools = result.get("tools", {})
 
     changed = []
@@ -222,7 +227,7 @@ def _tool_implementation(canonical: str, params: Dict[str, Any]) -> str:
             return blocked
 
     try:
-        result = get_client().call(canonical, params)
+        result = _bridge_call(canonical, params)
         return json.dumps(result, indent=2, default=repr)
     except BridgeError as e:
         detail = f"\n{json.dumps(e.details, default=repr)[:2000]}" if e.details else ""
@@ -273,11 +278,7 @@ async def server_lifespan(server: FastMCP) -> AsyncIterator[Dict[str, Any]]:
             logger.warning("Start Kit with omni.kit.mcp enabled, then call refresh_tools.")
         yield {}
     finally:
-        global _client
-        if _client:
-            logger.info("Disconnecting from the Kit bridge")
-            _client.close()
-            _client = None
+        # Connections are ephemeral (see _bridge_call) — nothing to tear down.
         logger.info("KitMCP server shut down")
 
 
