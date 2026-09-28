@@ -338,3 +338,21 @@ tests/                      protocol / registry / autoload / live-socket tests (
 ```bash
 python3 -m pytest tests/    # the socket server runs under plain asyncio in tests
 ```
+
+<!-- ailab-dashboard:begin -->
+
+---
+
+#### AILAB 지도
+
+| | |
+|---|---|
+| 목적 | Isaac Sim 등 Omniverse Kit 앱을 AI 에이전트가 MCP로 조작하게 하는 브리지·게이트웨이 |
+| 분류 | SIM3D 시뮬레이션 · 도구 · 운영 |
+| 기능 태그 | `개발 도구·에이전트 › MCP` · `시뮬레이션 › Isaac Sim` |
+| 기술 | Python · Isaac Sim · MCP |
+| 그래프 노드 | [`repo:airobotics-ailab/omni-kit-mcp`](https://github.com/airobotics-ailab/AILAB_DASHBOARD/blob/main/bindings/omni-kit-mcp.md) — 관계 · 작업환경 · 진행상황 · 근거 |
+
+<sub>[AILAB_DASHBOARD](https://github.com/airobotics-ailab/AILAB_DASHBOARD/blob/main/README.md) 가 `graph/catalog.json`·`graph/taxonomy.json` 에서 생성한 블록이다. 고칠 곳은 그 선언이다 (AI_PROPOSAL, 검토 전).</sub>
+
+<!-- ailab-dashboard:end -->
