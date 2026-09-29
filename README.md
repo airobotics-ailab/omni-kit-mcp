@@ -353,7 +353,7 @@ python3 -m pytest tests/    # the socket server runs under plain asyncio in test
 | 기술 | Python · Isaac Sim · MCP |
 | 담당 | @gira-airobotics (KYUNG JUN RA) · 추정 |
 | 그래프 노드 | [`repo:airobotics-ailab/omni-kit-mcp`](https://github.com/airobotics-ailab/AILAB_DASHBOARD/blob/main/bindings/omni-kit-mcp.md) — 관계 · 작업환경 · 진행상황 · 근거 |
-| 작업환경 연결 | [USL workspace linking](https://github.com/gj3447/USL/blob/master/docs/WORKSPACE_LINKING.md) (AGENTS.md) — 실제 경로·접속 정보는 각자 로컬에 두고, 공유는 작업환경 소유자가 승인한 비공개 등록처로만 ([AILAB 적용](https://github.com/airobotics-ailab/AILAB_DASHBOARD/blob/main/docs/WORKSPACE_REGISTRATION.md)) |
+| 작업환경 | 레포 목록·경로 [mani](https://manicli.com) `workspace.mani.yaml` · 개인 경로는 각자 `~/.config/mani/config.yaml` — 실제 경로·접속 정보는 커밋하지 않고, 공유는 작업환경 소유자가 승인한 비공개 등록처로만 ([등록](https://github.com/airobotics-ailab/AILAB_DASHBOARD/blob/main/docs/WORKSPACE_REGISTRATION.md)) |
 
 <sub>[AILAB_DASHBOARD](https://github.com/airobotics-ailab/AILAB_DASHBOARD/blob/main/README.md) 가 `graph/catalog.json`·`graph/taxonomy.json` 에서 생성한 블록이다. 고칠 곳은 그 선언이다 (AI_PROPOSAL, 검토 전).</sub>
 
