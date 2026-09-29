@@ -352,7 +352,7 @@ python3 -m pytest tests/    # the socket server runs under plain asyncio in test
 | 기능 태그 | `개발 도구·에이전트 › MCP` · `시뮬레이션 › Isaac Sim` |
 | 기술 | Python · Isaac Sim · MCP |
 | 그래프 노드 | [`repo:airobotics-ailab/omni-kit-mcp`](https://github.com/airobotics-ailab/AILAB_DASHBOARD/blob/main/bindings/omni-kit-mcp.md) — 관계 · 작업환경 · 진행상황 · 근거 |
-| 작업환경 등록 | 이 레포를 받은 곳은 `.ailab/workspaces/` 에 USL 로 자기 등록 — [방법](https://github.com/airobotics-ailab/AILAB_DASHBOARD/blob/main/docs/WORKSPACE_REGISTRATION.md) · AGENTS.md «Workspace registration» |
+| 작업환경 연결 | [USL workspace linking](https://github.com/gj3447/USL/blob/master/docs/WORKSPACE_LINKING.md) (AGENTS.md) — 실제 경로·접속 정보는 각자 로컬에 두고, 공유는 작업환경 소유자가 승인한 비공개 등록처로만 ([AILAB 적용](https://github.com/airobotics-ailab/AILAB_DASHBOARD/blob/main/docs/WORKSPACE_REGISTRATION.md)) |
 
 <sub>[AILAB_DASHBOARD](https://github.com/airobotics-ailab/AILAB_DASHBOARD/blob/main/README.md) 가 `graph/catalog.json`·`graph/taxonomy.json` 에서 생성한 블록이다. 고칠 곳은 그 선언이다 (AI_PROPOSAL, 검토 전).</sub>
 
