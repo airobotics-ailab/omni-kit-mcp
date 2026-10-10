@@ -1,0 +1,49 @@
+{
+  "schema": "graph-method-profile/v1",
+  "repo": "omni-kit-mcp",
+  "title": "omni-kit-mcp 그래프 검사 방법론",
+  "provider": {
+    "repo": "CHU-RELUVATOR",
+    "contract": "graph-method/v1",
+    "cli": "tools/graph_method.py"
+  },
+  "projection": {
+    "id": "graph-method",
+    "version": 1,
+    "owner": "AILAB_DASHBOARD"
+  },
+  "output": ".ailab/generated/graph-method",
+  "when": "요청된 그래프 구조·조회 효율 검사 또는 검사 도구 변경 때 선택한다.",
+  "notWhen": "일반 작업 시작·모델 실행·실장비 작업에는 자동 활성화하지 않는다.",
+  "automaticActivation": false,
+  "claimCeiling": "공통 방법론 연결만 검증한다. 소유 제품 검사·현재 모델 성능·실물·생산 수용은 UNKNOWN이다.",
+  "commands": [
+    {
+      "title": "공통 방법론의 로컬 선언 검사",
+      "argv": [
+        "python3",
+        "<GRAPH_METHOD_CLI>",
+        "check-profile",
+        "--root",
+        ".",
+        "--profile",
+        ".ailab/graph-method.profile.json"
+      ],
+      "mode": "offline",
+      "automatic": false,
+      "localFiles": []
+    }
+  ],
+  "sources": [
+    {
+      "id": "source:local:0",
+      "title": "AGENTS.md",
+      "path": "AGENTS.md"
+    },
+    {
+      "id": "source:local:1",
+      "title": "README.md",
+      "path": "README.md"
+    }
+  ]
+}
